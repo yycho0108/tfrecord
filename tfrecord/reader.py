@@ -11,10 +11,13 @@ import numpy as np
 from tfrecord import example_pb2
 from tfrecord import iterator_utils
 
+from torch_xla.utils import gcsfs
+
 
 def tfrecord_iterator(data_path: str,
                       index_path: typing.Optional[str] = None,
-                      shard: typing.Optional[typing.Tuple[int, int]] = None
+                      shard: typing.Optional[typing.Tuple[int, int]] = None,
+                      gcs:bool = False
                       ) -> typing.Iterable[memoryview]:
     """Create an iterator over the tfrecord dataset.
 
@@ -41,7 +44,14 @@ def tfrecord_iterator(data_path: str,
         Object referencing the specified `datum_bytes` contained in the
         file (for a single record).
     """
-    file = io.open(data_path, "rb")
+    if gcs:
+        # NOTE(ycho): internally, this function just downloads the file and actually
+        # just returns BytesIO instead. But then again, we'd like to access the
+        # whole file anyway.
+        file = gcsfs.open(data_path, "rb")
+    else:
+        # load file locally.
+        file = io.open(data_path, "rb")
 
     length_bytes = bytearray(8)
     crc_bytes = bytearray(4)
@@ -53,7 +63,16 @@ def tfrecord_iterator(data_path: str,
         if start_offset is not None:
             file.seek(start_offset)
         if end_offset is None:
-            end_offset = os.path.getsize(data_path)
+            if gcs:
+                # NOTE(ycho): Maybe not super correct
+                if isinstance(file, io.BytesIO):
+                    # This WILL be triggered but just to be sure ...
+                    end_offset = gcsfs.getbuffer().nbytes
+                else:
+                    # Fallback method, requires another request over the network
+                    end_offset = gcsfs.stat(data_path).size
+            else:
+                end_offset = os.path.getsize(data_path)
         while file.tell() < end_offset:
             if file.readinto(length_bytes) != 8:
                 raise RuntimeError("Failed to read the record size.")
@@ -155,6 +174,7 @@ def example_loader(data_path: str,
                    index_path: typing.Union[str, None],
                    description: typing.Union[typing.List[str], typing.Dict[str, str], None] = None,
                    shard: typing.Optional[typing.Tuple[int, int]] = None,
+                   gcs:bool = False
                    ) -> typing.Iterable[typing.Dict[str, np.ndarray]]:
     """Create an iterator over the (decoded) examples contained within
     the dataset.
@@ -196,7 +216,7 @@ def example_loader(data_path: str,
         "int": "int64_list"
     }
 
-    record_iterator = tfrecord_iterator(data_path, index_path, shard)
+    record_iterator = tfrecord_iterator(data_path, index_path, shard, gcs)
 
     for record in record_iterator:
         example = example_pb2.Example()
@@ -210,6 +230,7 @@ def sequence_loader(data_path: str,
                     context_description: typing.Union[typing.List[str], typing.Dict[str, str], None] = None,
                     features_description: typing.Union[typing.List[str], typing.Dict[str, str], None] = None,
                     shard: typing.Optional[typing.Tuple[int, int]] = None,
+                    gcs:bool = False
                     ) -> typing.Iterable[typing.Dict[str, np.ndarray]]:
     typename_mapping = {
         "byte": "bytes_list",
@@ -217,11 +238,14 @@ def sequence_loader(data_path: str,
         "int": "int64_list"
     }
 
-    record_iterator = tfrecord_iterator(data_path, index_path, shard)
+    record_iterator = tfrecord_iterator(data_path, index_path, shard, gcs)
 
     for record in record_iterator:
         example = example_pb2.SequenceExample()
         example.ParseFromString(record)
+
+        # print(example.context)
+        # print(example.feature_lists)
 
         context = extract_feature_dict(example.context, context_description, typename_mapping)
         features = extract_feature_dict(example.feature_lists, features_description, typename_mapping)
