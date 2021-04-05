@@ -11,6 +11,8 @@ import numpy as np
 from tfrecord import example_pb2
 from tfrecord import iterator_utils
 
+# NOTE(ycho): gcsfs DOES NOT have to be from `torch_xla`.
+# Consider removing this awkward dependency...
 from torch_xla.utils import gcsfs
 
 
@@ -66,10 +68,11 @@ def tfrecord_iterator(data_path: str,
             if gcs:
                 # NOTE(ycho): Maybe not super correct
                 if isinstance(file, io.BytesIO):
-                    # This WILL be triggered but just to be sure ...
-                    end_offset = gcsfs.getbuffer().nbytes
+                    # In general, this code path should be triggered.
+                    end_offset = file.getbuffer().nbytes
                 else:
-                    # Fallback method, requires another request over the network
+                    # Fallback method, requires another request over the network.
+                    # In general, this part should never run.
                     end_offset = gcsfs.stat(data_path).size
             else:
                 end_offset = os.path.getsize(data_path)
@@ -157,7 +160,7 @@ def extract_feature_dict(features, description, typename_mapping):
 
     if description is None:
         description = dict.fromkeys(all_keys, None)
-    elif isinstance(description, list):
+    elif isinstance(description, (list, tuple)):
         description = dict.fromkeys(description, None)
 
     processed_features = {}
@@ -243,9 +246,6 @@ def sequence_loader(data_path: str,
     for record in record_iterator:
         example = example_pb2.SequenceExample()
         example.ParseFromString(record)
-
-        # print(example.context)
-        # print(example.feature_lists)
 
         context = extract_feature_dict(example.context, context_description, typename_mapping)
         features = extract_feature_dict(example.feature_lists, features_description, typename_mapping)
