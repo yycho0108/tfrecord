@@ -46,14 +46,22 @@ def tfrecord_iterator(data_path: str,
         Object referencing the specified `datum_bytes` contained in the
         file (for a single record).
     """
-    if gcs:
-        # NOTE(ycho): internally, this function just downloads the file and actually
-        # just returns BytesIO instead. But then again, we'd like to access the
-        # whole file anyway.
-        file = gcsfs.open(data_path, "rb")
+
+    # NOTE(ycho): Bookkeeping for whether we should close the file after we're done.
+    should_close = True
+    if isinstance(data_path, io.IOBase):
+        # NOTE(ycho): Deal with supplied file-like object arg.
+        file = data_path
+        should_close = False
     else:
-        # load file locally.
-        file = io.open(data_path, "rb")
+        if gcs:
+            # NOTE(ycho): internally, this function just downloads the file and actually
+            # just returns BytesIO instead. But then again, we'd like to access the
+            # whole file anyway.
+            file = gcsfs.open(data_path, "rb")
+        else:
+            # load file locally.
+            file = io.open(data_path, "rb")
 
     length_bytes = bytearray(8)
     crc_bytes = bytearray(4)
@@ -62,20 +70,26 @@ def tfrecord_iterator(data_path: str,
     def read_records(start_offset=None, end_offset=None):
         nonlocal length_bytes, crc_bytes, datum_bytes
 
+        # If unspecified, query end_offset for `BytesIO` objects.
+        if (end_offset is None) and isinstance(file, io.BytesIO):
+            pos = file.tell()
+            file.seek(0, io.SEEK_END)
+            end_offset = file.tell()
+            file.seek(pos, io.SEEK_SET)
+
         if start_offset is not None:
             file.seek(start_offset)
+
+        # Fallback method in case `BytesIO` based one failed.
         if end_offset is None:
             if gcs:
-                # NOTE(ycho): Maybe not super correct
-                if isinstance(file, io.BytesIO):
-                    # In general, this code path should be triggered.
-                    end_offset = file.getbuffer().nbytes
-                else:
-                    # Fallback method, requires another request over the network.
-                    # In general, this part should never run.
-                    end_offset = gcsfs.stat(data_path).size
+                # Fallback method, requires another request over the network.
+                # In general, this part should never run.
+                end_offset = gcsfs.stat(data_path).size
             else:
+                # Fallback method for regular files.
                 end_offset = os.path.getsize(data_path)
+
         while file.tell() < end_offset:
             if file.readinto(length_bytes) != 8:
                 raise RuntimeError("Failed to read the record size.")
@@ -108,7 +122,8 @@ def tfrecord_iterator(data_path: str,
             end_byte = index[end_index] if end_index < num_records else None
             yield from read_records(start_byte, end_byte)
 
-    file.close()
+    if should_close:
+        file.close()
 
 
 def process_feature(feature: example_pb2.Feature,
