@@ -257,6 +257,7 @@ def tfrecord_loader(data_path: str,
                     index_path: typing.Union[str, None],
                     description: typing.Union[typing.List[str], typing.Dict[str, str], None] = None,
                     shard: typing.Optional[typing.Tuple[int, int]] = None,
+                    gcs:bool = False
                     ) -> typing.Iterable[typing.Dict[str, np.ndarray]]:
     """Create an iterator over the (decoded) examples contained within
     the dataset.
@@ -291,7 +292,7 @@ def tfrecord_loader(data_path: str,
         Decoded bytes of the features into its respective data type (for
         an individual record).
     """
-    return example_loader(data_path, index_path, description, shard)
+    return example_loader(data_path, index_path, description, shard, gcs)
 
 
 def multi_tfrecord_loader(data_pattern: str,
