@@ -58,6 +58,7 @@ def tfrecord_iterator(data_path: str,
             # load file locally.
             with io.open(data_path, 'rb') as f:
                 yield from tfrecord_iterator(f, index_path, shard)
+        return
 
     # At this point, we have validated isinstance(file, io.IOBase).
     file = data_path
