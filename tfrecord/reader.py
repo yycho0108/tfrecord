@@ -11,15 +11,10 @@ import numpy as np
 from tfrecord import example_pb2
 from tfrecord import iterator_utils
 
-# NOTE(ycho): gcsfs DOES NOT have to be from `torch_xla`.
-# Consider removing this awkward dependency...
-from torch_xla.utils import gcsfs
-
 
 def tfrecord_iterator(data_path: str,
                       index_path: typing.Optional[str] = None,
-                      shard: typing.Optional[typing.Tuple[int, int]] = None,
-                      gcs:bool = False
+                      shard: typing.Optional[typing.Tuple[int, int]] = None
                       ) -> typing.Iterable[memoryview]:
     """Create an iterator over the tfrecord dataset.
 
@@ -47,21 +42,25 @@ def tfrecord_iterator(data_path: str,
         file (for a single record).
     """
 
-    # NOTE(ycho): Bookkeeping for whether we should close the file after we're done.
-    should_close = True
-    if isinstance(data_path, io.IOBase):
-        # NOTE(ycho): Deal with supplied file-like object arg.
-        file = data_path
-        should_close = False
-    else:
+    # NOTE(ycho): Convert to file-like objects if not already done.
+    if not isinstance(data_path, io.IOBase):
+        gcs = (isinstance(data_path, str) and 'gs://' in data_path)
         if gcs:
+            # NOTE(ycho): gcsfs DOES NOT have to be from `torch_xla`.
+            # Consider removing this awkward dependency...
             # NOTE(ycho): internally, this function just downloads the file and actually
             # just returns BytesIO instead. But then again, we'd like to access the
             # whole file anyway.
-            file = gcsfs.open(data_path, "rb")
+            from torch_xla.utils import gcsfs
+            with gcsfs.open(data_path, 'rb') as f:
+                yield from tfrecord_iterator(f, index_path, shard)
         else:
             # load file locally.
-            file = io.open(data_path, "rb")
+            with io.open(data_path, 'rb') as f:
+                yield from tfrecord_iterator(f, index_path, shard)
+
+    # At this point, we have validated isinstance(file, io.IOBase).
+    file = data_path
 
     length_bytes = bytearray(8)
     crc_bytes = bytearray(4)
@@ -71,24 +70,15 @@ def tfrecord_iterator(data_path: str,
         nonlocal length_bytes, crc_bytes, datum_bytes
 
         # If unspecified, query end_offset for `BytesIO` objects.
-        if (end_offset is None) and isinstance(file, io.BytesIO):
+        if end_offset is None:
             pos = file.tell()
             file.seek(0, io.SEEK_END)
             end_offset = file.tell()
+            # NOTE(ycho): Restore `pos` to initial value.
             file.seek(pos, io.SEEK_SET)
 
         if start_offset is not None:
             file.seek(start_offset)
-
-        # Fallback method in case `BytesIO` based one failed.
-        if end_offset is None:
-            if gcs:
-                # Fallback method, requires another request over the network.
-                # In general, this part should never run.
-                end_offset = gcsfs.stat(data_path).size
-            else:
-                # Fallback method for regular files.
-                end_offset = os.path.getsize(data_path)
 
         while file.tell() < end_offset:
             if file.readinto(length_bytes) != 8:
@@ -121,9 +111,6 @@ def tfrecord_iterator(data_path: str,
             start_byte = index[start_index]
             end_byte = index[end_index] if end_index < num_records else None
             yield from read_records(start_byte, end_byte)
-
-    if should_close:
-        file.close()
 
 
 def process_feature(feature: example_pb2.Feature,
@@ -192,7 +179,6 @@ def example_loader(data_path: str,
                    index_path: typing.Union[str, None],
                    description: typing.Union[typing.List[str], typing.Dict[str, str], None] = None,
                    shard: typing.Optional[typing.Tuple[int, int]] = None,
-                   gcs:bool = False
                    ) -> typing.Iterable[typing.Dict[str, np.ndarray]]:
     """Create an iterator over the (decoded) examples contained within
     the dataset.
@@ -234,7 +220,7 @@ def example_loader(data_path: str,
         "int": "int64_list"
     }
 
-    record_iterator = tfrecord_iterator(data_path, index_path, shard, gcs)
+    record_iterator = tfrecord_iterator(data_path, index_path, shard)
 
     for record in record_iterator:
         example = example_pb2.Example()
@@ -247,8 +233,7 @@ def sequence_loader(data_path: str,
                     index_path: typing.Union[str, None],
                     context_description: typing.Union[typing.List[str], typing.Dict[str, str], None] = None,
                     features_description: typing.Union[typing.List[str], typing.Dict[str, str], None] = None,
-                    shard: typing.Optional[typing.Tuple[int, int]] = None,
-                    gcs:bool = False
+                    shard: typing.Optional[typing.Tuple[int, int]] = None
                     ) -> typing.Iterable[typing.Dict[str, np.ndarray]]:
     typename_mapping = {
         "byte": "bytes_list",
@@ -256,7 +241,7 @@ def sequence_loader(data_path: str,
         "int": "int64_list"
     }
 
-    record_iterator = tfrecord_iterator(data_path, index_path, shard, gcs)
+    record_iterator = tfrecord_iterator(data_path, index_path, shard)
 
     for record in record_iterator:
         example = example_pb2.SequenceExample()
@@ -271,8 +256,7 @@ def sequence_loader(data_path: str,
 def tfrecord_loader(data_path: str,
                     index_path: typing.Union[str, None],
                     description: typing.Union[typing.List[str], typing.Dict[str, str], None] = None,
-                    shard: typing.Optional[typing.Tuple[int, int]] = None,
-                    gcs:bool = False
+                    shard: typing.Optional[typing.Tuple[int, int]] = None
                     ) -> typing.Iterable[typing.Dict[str, np.ndarray]]:
     """Create an iterator over the (decoded) examples contained within
     the dataset.
@@ -307,7 +291,7 @@ def tfrecord_loader(data_path: str,
         Decoded bytes of the features into its respective data type (for
         an individual record).
     """
-    return example_loader(data_path, index_path, description, shard, gcs)
+    return example_loader(data_path, index_path, description, shard)
 
 
 def multi_tfrecord_loader(data_pattern: str,
